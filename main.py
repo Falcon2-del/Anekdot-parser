@@ -1,157 +1,94 @@
+import requests
+from bs4 import BeautifulSoup
+import smtplib
 import os
 import time
-import re
-import requests
-import smtplib
+from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
-from imap_tools import MailBox, AND
-from datetime import datetime
+from email.mime.image import MIMEImage
 
-# --- НАСТРОЙКИ ---
-CONFIG = {
-    "imap_server": "imap.gmail.com",
-    "email_user": "smithjohn01042000@gmail.com",
-    "email_pass": "nghy letu udzx hbdc",
-    "yandex_token": "y0__wgBEPSB7IQCGNuWAyDTpcOiF_PK9W6CqB0N1qJP3wxXsAgcvmWm",
-    "target_notification": "idolon666@gmail.com",
-    "sender_filter": "idolon666@gmail.com",
-    "sleep_time": 60,
-    "github_token": "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", # Рекомендую добавить в переменные окружения
-    "gist_id": "e9b2b65cab1cf8581fe3b33ff47681d6"
-}
+# --- НАСТРОЙКИ (Берутся из GitHub Secrets) ---
+SMTP_SERVER = "smtp.gmail.com"
+SMTP_PORT = 587
+EMAIL_USER = os.getenv("EMAIL_USER")
+EMAIL_PASS = os.getenv("EMAIL_PASS")
+EMAIL_TO = os.getenv("EMAIL_TO")
 
-def update_heartbeat():
-    """Обновляет Gist для системы мониторинга"""
-    if not CONFIG["github_token"]:
-        return
-    url = f"https://api.github.com/gists/{CONFIG['gist_id']}"
-    headers = {"Authorization": f"token {CONFIG['github_token']}"}
-    data = {
-        "description": "Heartbeat for Yandex Disk Downloader",
-        "files": {"heartbeat.txt": {"content": f"Last run: {datetime.now().isoformat()}"}}
-    }
-    try:
-        requests.patch(url, json=data, headers=headers, timeout=10)
-    except:
-        pass
+BASE_URL = "https://www.anekdot.ru"
+SEND_DELAY = 2  # Интервал между письмами 2 секунды
 
-def clean_name(name):
-    """
-    Обрезает строку до первого непечатного символа или запрещенного знака.
-    ПРОБЕЛЫ ТЕПЕРЬ РАЗРЕШЕНЫ.
-    """
-    if not name:
-        return "unnamed"
+def send_email(subject, body, img_data=None):
+    msg = MIMEMultipart('related') 
+    msg['From'] = EMAIL_USER
+    msg['To'] = EMAIL_TO
+    msg['Subject'] = f"Anekdot.ru: {subject}"
     
-    # Из списка запрещенных убран пробел: / \ : * ? " < > | '
-    match = re.search(r'[\x00-\x1F\x7F/\\:\*\?"<>|\']', name)
-    if match:
-        name = name[:match.start()]
+    html_body = body.replace('\n', '<br>')
+    if img_data:
+        html_template = "<html><body><p>{0}</p><img src='cid:meme_image'></body></html>"
+        msg.attach(MIMEText(html_template.format(html_body), 'html'))
+        try:
+            img = MIMEImage(img_data)
+            img.add_header('Content-ID', '<meme_image>')
+            msg.attach(img)
+        except: pass
+    else:
+        msg.attach(MIMEText(body, 'plain'))
     
-    return name.strip() or "unnamed"
-
-def create_yandex_folder(folder_name):
-    """Создает папку на Яндекс.Диске, если её нет"""
-    headers = {"Authorization": f"OAuth {CONFIG['yandex_token']}"}
-    clean_folder = clean_name(folder_name)
-    requests.put(f"https://cloud-api.yandex.net/v1/disk/resources?path={clean_folder}", headers=headers)
-    return clean_folder
-
-def get_file_size_mb(path):
-    headers = {"Authorization": f"OAuth {CONFIG['yandex_token']}"}
-    res = requests.get(f"https://cloud-api.yandex.net/v1/disk/resources?path={path}", headers=headers)
-    if res.status_code == 200:
-        size_bytes = res.json().get('size', 0)
-        return round(size_bytes / (1024 * 1024), 2)
-    return 0
-
-def send_final_notification(filename, size_mb):
-    body = (
-        f"✅ Загрузка на Яндекс.Диск завершена!\n\n"
-        f"📁 Файл: {filename}\n"
-        f"⚖️ Размер: {size_mb} MB\n"
-    )
-    msg = MIMEText(body)
-    msg['Subject'] = f"Завершено: {filename}"
-    msg['From'] = CONFIG["email_user"]
-    msg['To'] = CONFIG["target_notification"]
     try:
-        with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
-            server.login(CONFIG["email_user"], CONFIG["email_pass"])
+        with smtplib.SMTP(SMTP_SERVER, SMTP_PORT, timeout=15) as server:
+            server.starttls()
+            server.login(EMAIL_USER, EMAIL_PASS)
             server.send_message(msg)
-    except: pass
-
-def parse_content(text):
-    text = re.sub('<[^<]+?>', '', text).replace('\r', '').strip()
-    url_match = re.search(r'https?://[^\s]+', text)
-    if not url_match:
-        return None, None
-    url = url_match.group(0).strip()
-    
-    series_match = re.search(r'Смотреть (.+?) Сезон (\d+) - Эпизод (\d+)', text)
-    if series_match:
-        title, s_num, e_num = series_match.groups()
-        folder = create_yandex_folder(title.strip())
-        filename = f"{int(s_num):02d}-{int(e_num):02d}.mp4"
-        return url, f"{folder}/{filename}"
-
-    movie_match = re.search(r'Смотреть (.+?) (?:Дубляж|1080p|720p|\d+p)', text)
-    if movie_match:
-        title = clean_name(movie_match.group(1).strip())
-        return url, f"{title}.mp4"
-
-    other_match = re.search(rf'{re.escape(url)}\s+(.+)', text)
-    if other_match:
-        filename = clean_name(other_match.group(1).strip())
-        return url, filename
-    
-    raw_name = url.split('/')[-1]
-    return url, clean_name(raw_name)
-
-def upload_via_yandex_async(url, yandex_path):
-    headers = {"Authorization": f"OAuth {CONFIG['yandex_token']}"}
-    params = {"url": url, "path": f"/{yandex_path}", "overwrite": "true"}
-    
-    try:
-        res = requests.post("https://cloud-api.yandex.net/v1/disk/resources/upload", params=params, headers=headers)
-        if res.status_code not in [201, 202]: return False
-        
-        status_url = res.json().get('href')
-        while True:
-            status_res = requests.get(status_url, headers=headers)
-            status = status_res.json().get('status', 'failed')
-            if status == 'success': return True
-            elif status == 'failed': return False
-            time.sleep(20)
-    except: return False
-
-# --- ЦИКЛ ---
-print(f"--- Скрипт запущен ---")
-last_heartbeat = 0
-
-while True:
-    # Обновление Heartbeat раз в 1 минут
-    if time.time() - last_heartbeat > 60:
-        update_heartbeat()
-        last_heartbeat = time.time()
-
-    try:
-        with MailBox(CONFIG["imap_server"]).login(CONFIG["email_user"], CONFIG["email_pass"]) as mailbox:
-            msgs = list(mailbox.fetch(AND(from_=CONFIG["sender_filter"], seen=False)))
-            for msg in msgs:
-                content = msg.text or msg.html or ""
-                f_url, f_path = parse_content(content)
-                
-                if f_url and f_path:
-                    if upload_via_yandex_async(f_url, f_path):
-                        size = get_file_size_mb(f_path)
-                        send_final_notification(f_path, size)
-                        mailbox.flag(msg.uid, ['SEEN'], True)
-                    else:
-                        print(f"Ошибка загрузки: {f_path}")
-                else:
-                    mailbox.flag(msg.uid, ['SEEN'], True)
+            return True
     except Exception as e:
-        print(f"Ошибка: {e}")
+        print(f"Ошибка отправки: {e}")
+        return False
+
+def run_delivery():
+    targets = [
+        {'url': '/last/anekdot/', 'type': 'анекдот'},
+        {'url': '/last/story/', 'type': 'история'},
+        {'url': '/last/mem/', 'type': 'мем'}
+    ]
+    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0 Safari/537.36'}
     
-    time.sleep(CONFIG["sleep_time"])
+    for target in targets:
+        print(f"\nОбработка раздела: {target['type']}")
+        # Берем только первую страницу для разового запуска
+        url = f"{BASE_URL}{target['url']}"
+        try:
+            res = requests.get(url, headers=headers, timeout=20)
+            soup = BeautifulSoup(res.text, 'html.parser')
+            items = soup.find_all('div', class_='topicbox')
+            
+            for item in items:
+                text_div = item.find('div', class_='text')
+                if target['type'] in ['анекдот', 'история'] and text_div:
+                    content = text_div.get_text(separator='\n').strip()
+                    if len(content) > 10:
+                        if send_email(target['type'], content):
+                            print(f"  [OK] {target['type']} отправлен")
+                            time.sleep(SEND_DELAY)
+
+                elif target['type'] == 'мем':
+                    img_tag = item.find('img')
+                    if img_tag:
+                        src = img_tag.get('data-src') or img_tag.get('src')
+                        if src:
+                            try:
+                                img_bytes = requests.get(src, headers=headers, timeout=10).content
+                                if send_email('мем', img_tag.get('alt', ''), img_bytes):
+                                    print(f"  [OK] мем отправлен")
+                                    time.sleep(SEND_DELAY)
+                            except: pass
+        except Exception as e:
+            print(f"Ошибка при обработке {target['type']}: {e}")
+
+if __name__ == "__main__":
+    if not all([EMAIL_USER, EMAIL_PASS, EMAIL_TO]):
+        print("Ошибка: Не настроены секреты (EMAIL_USER, EMAIL_PASS, EMAIL_TO)")
+    else:
+        print("Запуск рассылки...")
+        run_delivery()
+        print("Готово!")
