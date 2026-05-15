@@ -1,7 +1,7 @@
 name: Send Jokes
 
 on:
-  workflow_dispatch: # Оставляем только ручной запуск кнопкой
+  workflow_dispatch: 
 
 jobs:
   build:
@@ -9,12 +9,16 @@ jobs:
 
     steps:
     - name: Checkout code
-      uses: actions/checkout@v3
+      uses: actions/checkout@v4 # Обновил до v4
 
     - name: Set up Python
-      uses: actions/setup-python@v4
+      uses: actions/setup-python@v5 # Обновил до v5
       with:
         python-version: '3.9'
+
+    - name: Install dependencies
+      run: |
+        pip install requests beautifulsoup4
 
     - name: Run script
       env:
